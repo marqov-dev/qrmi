@@ -22,6 +22,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use crate::credential_file::CredentialFile;
 use crate::ibm::qiskit_runtime_service::models::{
     CreateJobRequestOneOfAllOfParams, EstimatorV2Input, NoiseLearnerInput, SamplerV2Input,
 };
@@ -67,6 +68,65 @@ impl IBMQiskitRuntimeService {
     /// * QRMI_IBM_QRS_TIMEOUT_SECONDS or QRMI_JOB_TIMEOUT_SECONDS - (optional) Cost for the job (seconds)
     /// * QRMI_IBM_QRS_SESSION_ID or QRMI_JOB_ACQUISITION_TOKEN - (optional) pre‐set session ID
     pub fn new(backend_name: &str) -> Result<Self> {
+        // Secure path: SPANK plugin wrote a credential file for this resource.
+        //
+        // The credential file provides endpoint, service_crn, and access_token (bearer).
+        // IAM apikey and iam_endpoint are read from env vars if available (for token
+        // refresh); if absent, the pre-seeded bearer token is used as-is until it
+        // expires.  Non-SPANK callers that don't set the env var fall through to the
+        // legacy individual-env-var path unchanged.
+        if let Some(creds) = CredentialFile::from_env(backend_name)
+            .map_err(|e| anyhow!("credential file error for {backend_name}: {e}"))?
+        {
+            let ibm = creds
+                .ibm_credentials()
+                .map_err(|e| anyhow!("credential file validation error: {e}"))?;
+
+            let session_mode = env::var(format!("{backend_name}_QRMI_IBM_QRS_SESSION_MODE"))
+                .unwrap_or_else(|_| "dedicated".to_string());
+            let session_max_ttl: i32 =
+                env::var(format!("{backend_name}_QRMI_IBM_QRS_SESSION_MAX_TTL"))
+                    .ok()
+                    .and_then(|s| s.parse::<i32>().ok())
+                    .unwrap_or(28800);
+            let timeout_secs: Option<i32> =
+                env::var(format!("{backend_name}_QRMI_IBM_QRS_TIMEOUT_SECONDS"))
+                    .ok()
+                    .or_else(|| env::var(format!("{backend_name}_QRMI_JOB_TIMEOUT_SECONDS")).ok())
+                    .and_then(|s| s.parse::<i32>().ok());
+            let session_id = env::var(format!("{backend_name}_QRMI_IBM_QRS_SESSION_ID"))
+                .ok()
+                .or_else(|| {
+                    env::var(format!("{backend_name}_QRMI_JOB_ACQUISITION_TOKEN")).ok()
+                });
+
+            // IAM key/endpoint are optional when a bearer token is already present.
+            let api_key =
+                env::var(format!("{backend_name}_QRMI_IBM_QRS_IAM_APIKEY")).unwrap_or_default();
+            let iam_endpoint =
+                env::var(format!("{backend_name}_QRMI_IBM_QRS_IAM_ENDPOINT")).unwrap_or_default();
+
+            let mut config = configuration::Configuration::new();
+            config.base_path = ibm.endpoint;
+            config.bearer_access_token = Some(ibm.access_token);
+            config.crn = Some(ibm.service_crn);
+
+            return Ok(Self {
+                config,
+                backend_name: backend_name.to_string(),
+                session_id,
+                calibration_id: None,
+                timeout_secs,
+                session_mode,
+                session_max_ttl,
+                api_key,
+                iam_endpoint,
+                token_expiration: 0,
+                token_lifetime: 0,
+            });
+        }
+
+        // Legacy path: individual env vars (non-SPANK callers).
         let qrs_endpoint =
             env::var(format!("{backend_name}_QRMI_IBM_QRS_ENDPOINT")).map_err(|_| {
                 anyhow!("{backend_name}_QRMI_IBM_QRS_ENDPOINT environment variable is not set")

@@ -153,6 +153,13 @@ impl CredentialFile {
             }
         };
 
+        if self.access_token.is_empty() {
+            return Err(CredentialFileError::MissingField {
+                field: "access_token",
+                resource_type: self.resource_type,
+            });
+        }
+
         let endpoint = require(self.endpoint, "endpoint")?;
         let service_crn = require(self.service_crn, "service_crn")?;
         let s3_endpoint = require(self.s3_endpoint, "s3_endpoint")?;
@@ -314,6 +321,23 @@ mod tests {
         } else {
             panic!("expected MissingField error");
         }
+    }
+
+    #[test]
+    fn test_ibm_missing_access_token_errors() {
+        let json = r#"{
+            "version":"1","resource_name":"h","resource_type":"ibm-quantum-system",
+            "endpoint":"https://q.example.com","service_crn":"crn:v1:test",
+            "access_token":"","token_expires_at":null,
+            "s3_endpoint":"https://s3.example.com","s3_bucket":"b",
+            "s3_region":"us-east","s3_access_key_id":"k","s3_secret_access_key":"s"
+        }"#;
+        let f = tempfile::NamedTempFile::new().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(f.path(), json).unwrap();
+        std::fs::set_permissions(f.path(), std::fs::Permissions::from_mode(0o400)).unwrap();
+        let creds = CredentialFile::from_path(f.path().to_str().unwrap()).unwrap();
+        assert!(creds.ibm_credentials().is_err(), "empty access_token should error");
     }
 
     #[test]
