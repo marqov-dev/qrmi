@@ -12,6 +12,7 @@
 
 pub(crate) mod common;
 pub(crate) mod consts;
+pub mod credential_file;
 pub mod ibm;
 pub mod pasqal;
 

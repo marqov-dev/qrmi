@@ -10,6 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use crate::credential_file::CredentialFile;
 use crate::models::{Payload, ResourceType, Target, TaskResult, TaskStatus};
 use crate::QuantumResource;
 use anyhow::{anyhow, bail, Result};
@@ -186,6 +187,71 @@ impl PasqalCloud {
             backend_name
         );
 
+        // Secure path: SPANK plugin wrote a credential file for this resource.
+        if let Some(creds) = CredentialFile::from_env(backend_name)
+            .map_err(|e| anyhow!("credential file error for {backend_name}: {e}"))?
+        {
+            let pasqal = creds
+                .pasqal_credentials()
+                .map_err(|e| anyhow!("credential file validation error: {e}"))?;
+
+            // Project ID is not in the credential file schema (Phase 1); fall back to env/config.
+            let cfg = read_pasqal_config(backend_name)?;
+            let project_id_var = format!("{backend_name}_QRMI_PASQAL_CLOUD_PROJECT_ID");
+            let project_id = env::var(&project_id_var)
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or(cfg.project_id.clone().filter(|v| !v.trim().is_empty()))
+                .or(read_qrmi_config_env_value(
+                    backend_name,
+                    "QRMI_PASQAL_CLOUD_PROJECT_ID",
+                ))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{project_id_var} is not set and no project_id was found in ~/.pasqal/config or /etc/slurm/qrmi_config.json"
+                    )
+                })?;
+
+            let auth_endpoint_var = format!("{backend_name}_QRMI_PASQAL_CLOUD_AUTH_ENDPOINT");
+            let auth_endpoint = env::var(&auth_endpoint_var)
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or(cfg.auth_endpoint.clone().filter(|v| !v.trim().is_empty()))
+                .or(read_qrmi_config_env_value(
+                    backend_name,
+                    "QRMI_PASQAL_CLOUD_AUTH_ENDPOINT",
+                ))
+                .unwrap_or_else(|| DEFAULT_PASQAL_CLOUD_AUTH_ENDPOINT.to_string());
+
+            let base_url_var = format!("{backend_name}_QRMI_PASQAL_CLOUD_BASE_URL");
+            let base_url = env::var(&base_url_var)
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or(read_qrmi_config_env_value(
+                    backend_name,
+                    "QRMI_PASQAL_CLOUD_BASE_URL",
+                ));
+
+            debug!(
+                "Build PasqalCloud client for backend '{}' (credential file path)",
+                backend_name
+            );
+            let mut builder = ClientBuilder::new(project_id);
+            builder.with_auth_endpoint(auth_endpoint);
+            if let Some(base_url) = base_url {
+                builder.with_base_url(base_url);
+            }
+            builder.with_token(pasqal.access_token);
+            let api_client = builder.build()?;
+
+            return Ok(Self {
+                api_client,
+                backend_name: backend_name.to_string(),
+                task_kinds: std::collections::HashMap::new(),
+            });
+        }
+
+        // Legacy path: individual env vars / config file (non-SPANK callers).
         let cfg = read_pasqal_config(backend_name)?;
 
         // Project ID

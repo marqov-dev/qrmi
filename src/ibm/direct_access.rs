@@ -10,6 +10,7 @@
 // copyright notice, and modified files need to carry a notice indicating
 // that they have been altered from the originals.
 
+use crate::credential_file::CredentialFile;
 use crate::models::{Payload, ResourceType, Target, TaskResult, TaskStatus};
 use crate::QuantumResource;
 use anyhow::{anyhow, bail, Result};
@@ -53,6 +54,65 @@ impl IBMDirectAccess {
     /// * `QRMI_IBM_DA_SERVICE_CRN`: Provisioned Direct Access Service instance
     /// * `QRMI_JOB_TIMEOUT_SECONDS`: Time (in seconds) after which job should time out and get cancelled.
     pub fn new(resource_id: &str) -> Result<Self> {
+        // Secure path: SPANK plugin wrote a credential file for this resource.
+        //
+        // TODO: AuthMethod::BearerToken does not yet exist in quantum_system_client.
+        // Once that variant is added the credential-file path can bypass IAM token
+        // exchange entirely and use creds.access_token directly.  For now we
+        // validate the file (defence-in-depth: rejects tampered files) but fall
+        // through to the legacy env-var path so non-SPANK callers are unaffected.
+        if let Some(creds) = CredentialFile::from_env(resource_id)
+            .map_err(|e| anyhow!("credential file error for {resource_id}: {e}"))?
+        {
+            let ibm = creds
+                .ibm_credentials()
+                .map_err(|e| anyhow!("credential file validation error: {e}"))?;
+
+            let mut builder = ClientBuilder::new(ibm.endpoint);
+
+            // TODO: replace with AuthMethod::BearerToken { token: ibm.access_token }
+            // once that variant is available.  For now we still need an IAM apikey;
+            // if the caller set one, use it.  Otherwise this will hit
+            // AuthMethod::None and requests will be unauthenticated until the
+            // BearerToken variant is available.
+            let apikey = env::var(format!("{resource_id}_QRMI_IBM_DA_IAM_APIKEY")).ok();
+            let iam_endpoint_url =
+                env::var(format!("{resource_id}_QRMI_IBM_DA_IAM_ENDPOINT")).ok();
+            if let (Some(apikey), Some(iam_endpoint_url)) = (apikey, iam_endpoint_url) {
+                builder.with_auth(AuthMethod::IbmCloudIam {
+                    apikey,
+                    service_crn: ibm.service_crn,
+                    iam_endpoint_url,
+                });
+            }
+
+            let retry_policy = ExponentialBackoff::builder()
+                .retry_bounds(Duration::from_secs(1), Duration::from_secs(5))
+                .jitter(Jitter::Bounded)
+                .base(2)
+                .build_with_max_retries(5);
+            builder
+                .with_timeout(Duration::from_secs(60))
+                .with_retry_policy(retry_policy);
+
+            let s3_endpoint_for_daapi =
+                env::var(format!("{resource_id}_QRMI_IBM_DA_S3_ENDPOINT_FOR_DAAPI")).ok();
+            builder.with_s3bucket(
+                &ibm.s3_access_key_id,
+                &ibm.s3_secret_access_key,
+                &ibm.s3_endpoint,
+                &ibm.s3_bucket,
+                &ibm.s3_region,
+                s3_endpoint_for_daapi,
+            );
+
+            return Ok(Self {
+                api_client: builder.build().unwrap(),
+                backend_name: resource_id.to_string(),
+            });
+        }
+
+        // Legacy path: individual env vars (non-SPANK callers).
         // Check to see if the environment variables required to run this program are set.
         let daapi_endpoint =
             env::var(format!("{resource_id}_QRMI_IBM_DA_ENDPOINT")).map_err(|_| {
