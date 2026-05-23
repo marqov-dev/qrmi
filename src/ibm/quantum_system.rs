@@ -107,7 +107,7 @@ impl IBMQuantumSystem {
             );
 
             return Ok(Self {
-                api_client: builder.build().unwrap(),
+                api_client: builder.build().map_err(|e| anyhow!("Failed to build client: {e}"))?,
                 backend_name: resource_id.to_string(),
             });
         }
@@ -182,7 +182,7 @@ impl IBMQuantumSystem {
         }
 
         Ok(Self {
-            api_client: builder.build().unwrap(),
+            api_client: builder.build().map_err(|e| anyhow!("Failed to build client: {e}"))?,
             backend_name: resource_id.to_string(),
         })
     }
