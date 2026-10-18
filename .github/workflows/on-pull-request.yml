@@ -5,6 +5,7 @@ name: Pull request
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     branches: [ "main" ]
 
 concurrency:
@@ -14,13 +15,13 @@ concurrency:
 jobs:
 
   check-broken-links:
-    if: github.repository_owner == 'qiskit-community'
+    if: (github.repository_owner == 'qiskit-community') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     uses: ./.github/workflows/broken-links.yml
 
   # Only x86_64 is selected for libqrmi in this worflow. The other architectures are handled in the on-schedule workflow.
   # Build, unit-test, lint and format-check all QRMI Rust targets (including libqrmi)
   libqrmi:
-    if: github.repository_owner == 'qiskit-community'
+    if: (github.repository_owner == 'qiskit-community') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     uses: ./.github/workflows/libqrmi.yml
     with:
       arch-x86_64: true
@@ -33,7 +34,7 @@ jobs:
   # Only x86_64 is selected for wheels in this workflow. The other architectures are handled in the on-schedule workflow.
   # Build, unit-test, lint and format check wheels.
   wheels:
-    if: github.repository_owner == 'qiskit-community'
+    if: (github.repository_owner == 'qiskit-community') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
     uses: ./.github/workflows/wheels.yml
     with:
       arch-x86_64: true
